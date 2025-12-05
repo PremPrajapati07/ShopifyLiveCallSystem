@@ -18,28 +18,28 @@ const io = new Server(server, {
 });
 
 // Serve static files from this folder
-app.use(express.static(path.join(__dirname)));
+// app.use(express.static(path.join(__dirname)));
 app.use(express.static(path.join(__dirname, "public")));
 
 
 // Serve index.html for root
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
+  res.sendFile(path.join(__dirname, "public/html/index.html"));
 });
 
 // Serve admin.html for /admin
 app.get("/admin", (req, res) => {
-  res.sendFile(path.join(__dirname, "admin.html"));
+  res.sendFile(path.join(__dirname, "public/html/admin.html"));
 });
 
 // Serve call-request.html for /call-request
 app.get("/call-request", (req, res) => {
-  res.sendFile(path.join(__dirname, "call-request.html"));
+  res.sendFile(path.join(__dirname, "public/html/call-request.html"));
 });
 
 // Serve video-call.html
 app.get("/video-call", (req, res) => {
-  res.sendFile(path.join(__dirname, "video-call.html"));
+  res.sendFile(path.join(__dirname, "public/html/video-call.html"));
 });
 
 // Serve health check endpoint
@@ -156,6 +156,22 @@ io.on("connection", (socket) => {
       }
     }, 30 * 60 * 1000); // 30 minutes
   });
+// Admin requests active rooms
+socket.on("get-active-rooms", () => {
+  console.log(`Admin ${socket.id} requesting active rooms`);
+  
+  const activeRoomsList = Object.entries(activeRooms).map(([roomId, room]) => ({
+    roomId,
+    userData: room.userData,
+    users: Array.from(room.users),
+    createdAt: room.createdAt
+  }));
+  
+  socket.emit("active-rooms", {
+    count: activeRoomsList.length,
+    rooms: activeRoomsList
+  });
+});
 
   // Admin joins admin-room and receives all waiting users
   socket.on("admin-join", () => {
@@ -254,6 +270,12 @@ io.on("connection", (socket) => {
       timestamp: new Date().toISOString(),
       connectionTimeout: 90 // seconds
     });
+io.to("admin-room").emit("room-created", {
+  roomId: roomId,
+  userData: userData,
+  adminId: socket.id,
+  timestamp: new Date().toISOString()
+});
 
     // Notify the admin that the call has been accepted and provide roomId
     socket.emit("call-accepted-admin", { 
@@ -536,6 +558,108 @@ io.on("connection", (socket) => {
       }
     }, 30000); // 30 seconds
   });
+// Chat messages
+socket.on("chat-message", ({ room, message, senderName, senderRole }) => {
+  console.log(`Chat message in room ${room} from ${senderName} (${senderRole}): ${message.substring(0, 50)}...`);
+  
+  const messageData = {
+    message: message,
+    senderName: senderName,
+    senderRole: senderRole,
+    timestamp: new Date().toISOString(),
+    socketId: socket.id
+  };
+  
+  // Broadcast to room
+  socket.to(room).emit("chat-message", messageData);
+  
+  // Also send back to sender for confirmation
+  socket.emit("chat-message-sent", {
+    ...messageData,
+    status: "sent"
+  });
+});
+// Send single product to room
+// In server.js, update the "send-product" handler:
+socket.on("send-product", ({ room, product }) => {
+  console.log(`Sending product to room ${room}: ${product.title}`);
+  
+  if (!room || !product) {
+    socket.emit("send-product-error", { error: "Missing room or product data" });
+    return;
+  }
+  
+  // Check if room exists
+  if (!activeRooms[room]) {
+    socket.emit("send-product-error", { error: "Room not found" });
+    return;
+  }
+  
+  // Send product info to all users in the room
+  io.to(room).emit("product-shared", {
+    product: product,
+    sender: socket.id,
+    senderName: userDataMap[socket.id]?.name || "Admin",
+    timestamp: new Date().toISOString()
+  });
+  
+  // Confirm to sender
+  socket.emit("product-sent", {
+    room: room,
+    product: product,
+    timestamp: new Date().toISOString()
+  });
+});
+// Send multiple products to room
+socket.on("send-products", ({ room, products }) => {
+  console.log(`Sending ${products.length} products to room ${room}`);
+  
+  if (!room || !products || !Array.isArray(products)) {
+    socket.emit("send-product-error", { error: "Missing room or products data" });
+    return;
+  }
+  
+  // Check if room exists
+  if (!activeRooms[room]) {
+    socket.emit("send-product-error", { error: "Room not found" });
+    return;
+  }
+  
+  // Send products info to all users in the room
+  io.to(room).emit("products-shared", {
+    products: products,
+    sender: socket.id,
+    timestamp: new Date().toISOString(),
+    count: products.length,
+    type: 'multiple'
+  });
+  
+  // Confirm to sender
+  socket.emit("products-sent", {
+    room: room,
+    products: products,
+    timestamp: new Date().toISOString()
+  });
+});
+socket.on("get-room-details", ({ roomId }) => {
+  console.log(`Requesting details for room ${roomId}`);
+  
+  const room = activeRooms[roomId];
+  if (room) {
+    socket.emit("room-info", {
+      roomId: roomId,
+      userData: room.userData,
+      users: Array.from(room.users),
+      createdAt: room.createdAt,
+      status: room.status
+    });
+  } else {
+    socket.emit("room-info", {
+      roomId: roomId,
+      error: "Room not found"
+    });
+  }
+});
 
   // Error handler
   socket.on("error", (error) => {
@@ -550,7 +674,13 @@ io.on("connection", (socket) => {
 // Helper function to clean up room
 function cleanupRoom(roomId) {
   console.log(`Cleaning up room ${roomId}`);
-  
+  io.to("admin-room").emit("room-ended", {
+  roomId: roomId,
+  reason: "call-ended",
+  timestamp: new Date().toISOString()
+});
+
+
   // Clear timeout if exists
   if (connectionTimeouts[roomId]) {
     clearTimeout(connectionTimeouts[roomId]);
