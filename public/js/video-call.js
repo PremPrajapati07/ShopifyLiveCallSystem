@@ -700,7 +700,17 @@ async function joinRoom() {
   }
 
   statusEl.textContent = `Joining room: ${roomId}`;
+    // Check if we're reconnecting
+  const isReconnecting = sessionStorage.getItem(`reconnecting-${roomId}`);
   
+  if (isReconnecting) {
+    console.log("Reconnecting to existing room");
+    statusEl.textContent = "Reconnecting to call...";
+    
+    // Clear the flag
+    sessionStorage.removeItem(`reconnecting-${roomId}`);
+  }
+
   // Step 1: Get local media FIRST
   const mediaSuccess = await getLocalMedia();
   if (!mediaSuccess) {
@@ -799,7 +809,24 @@ socket.on("offer", async (offer) => {
     setTimeout(() => socket.emit("offer", { room: roomId, offer }), 1000);
   }
 });
-
+// Handle peer reconnected event
+socket.on("peer-reconnected", (data) => {
+  console.log("Peer reconnected:", data.socketId);
+  
+  addChatMessage({
+    sender: "system",
+    message: `${data.role === "admin" ? "Support agent" : "Customer"} has reconnected`,
+    timestamp: new Date(),
+    senderName: "System"
+  });
+  
+  // If we're admin and peer reconnected, create new offer
+  if (role === "admin" && pc && pc.signalingState === "stable") {
+    setTimeout(() => {
+      createAndSendOffer();
+    }, 1000);
+  }
+});
 socket.on("answer", async (answer) => {
   console.log("Received answer");
   try {
@@ -842,16 +869,45 @@ socket.on("disconnect", () => {
     }
   }, 2000);
 });
+// Add these socket event handlers after the existing ones
+socket.on("reconnect-success", (data) => {
+  console.log("Reconnected successfully to room:", data.roomId);
+  statusEl.textContent = "Reconnected to call";
+  
+  // Add system message to chat
+  addChatMessage({
+    sender: "system",
+    message: "Reconnected to the call",
+    timestamp: new Date(),
+    senderName: "System"
+  });
+});
 
+socket.on("reconnect-failed", (data) => {
+  console.log("Reconnection failed:", data.reason);
+  statusEl.textContent = "Failed to reconnect to call";
+  
+  // Show option to reload
+  permissionMessage.textContent = "Reconnection failed. Please refresh the page.";
+  permissionOverlay.style.display = "flex";
+});
+// Update the reconnect event handler
 socket.on("reconnect", () => {
   console.log("Reconnected to server");
   statusEl.textContent = "Reconnected to server";
   
-  // Rejoin room
+  // Rejoin room and handle reconnection
   if (roomId && pc) {
     socket.emit("join-room", roomId);
+    
+    // Set reconnecting flag
+    sessionStorage.setItem(`reconnecting-${roomId}`, 'true');
+    
     // Re-send ICE candidates
     flushIceCandidates();
+    
+    // Handle media reconnection
+    handleReconnection();
   }
 });
 
@@ -1044,6 +1100,20 @@ skipPermissionBtn.onclick = async () => {
 
 // Initialize
 window.addEventListener("load", () => {
+    const reconnectTime = sessionStorage.getItem(`reconnect-time-${roomId}`);
+    if (reconnectTime) {
+      const timeDiff = Date.now() - parseInt(reconnectTime);
+      // Only auto-reconnect if within 10 seconds
+      if (timeDiff < 10000) {
+        console.log("Auto-reconnecting after refresh");
+        statusEl.textContent = "Reconnecting after refresh...";
+      } else {
+          // Clear old reconnection data
+        sessionStorage.removeItem(`reconnecting-${roomId}`);
+        sessionStorage.removeItem(`reconnect-time-${roomId}`);
+      }
+    }
+
   if (roomId) {
     // Show status immediately
     statusEl.textContent = `In call as ${role === 'admin' ? 'Support Agent' : userName}`;
@@ -1057,11 +1127,26 @@ window.addEventListener("load", () => {
 });
 
 // Handle page refresh/close
-window.addEventListener("beforeunload", () => {
+window.addEventListener("beforeunload", (e) => {
+  // Set flag for reconnection
+  if (roomId) {
+    sessionStorage.setItem(`reconnecting-${roomId}`, 'true');
+    sessionStorage.setItem(`reconnect-time-${roomId}`, Date.now().toString());
+      sessionStorage.removeItem(`in-room-${roomId}`);
+
+  }
+  
   // Notify server that user is leaving
   socket.emit("leave-room", roomId);
+  
+  // Only show confirmation if we're actively in a call
+  if (pc && pc.connectionState === "connected") {
+    // Show confirmation dialog
+    e.preventDefault();
+    e.returnValue = "Are you sure you want to leave the call?";
+    return e.returnValue;
+  }
 });
-
 // Request notification permission for chat notifications
 if (Notification.permission === "default") {
   Notification.requestPermission();
@@ -1273,6 +1358,12 @@ function sendProductToCall(product) {
   
   console.log('Sending product to call:', product.title);
   
+  // Check if socket is connected
+  if (!socket.connected) {
+    alert('Not connected to server. Please wait for reconnection.');
+    return;
+  }
+  
   // Prepare product data
   const productData = {
     title: product.title,
@@ -1296,6 +1387,7 @@ function sendProductToCall(product) {
   // Show success toast
   showToast(`✅ Sent "${product.title}" to chat`);
 }
+
 function addProductToChat(product, isFromMe = false) {
   const timestamp = new Date();
   
@@ -1510,4 +1602,93 @@ function setupCatalogEventListeners() {
     filterProducts();
     renderProducts();
   });
+}
+function handleReconnection() {
+  console.log("Handling reconnection...");
+  
+  // Clear existing remote video
+  if (remoteVideo.srcObject) {
+    remoteVideo.srcObject = null;
+  }
+  
+  // Clear peer connection
+  if (pc) {
+    pc.close();
+    pc = null;
+  }
+  
+  // Clear ice candidates
+  iceCandidates = [];
+  peerConnectionConfigured = false;
+  
+  // Rejoin room
+  if (roomId && socket.connected) {
+    console.log("Rejoining room:", roomId);
+    socket.emit("join-room", roomId);
+    
+    // Notify server we've reconnected
+    socket.emit("reconnect-call", { 
+      room: roomId, 
+      userId: socket.id 
+    });
+    
+    // Recreate peer connection
+    setTimeout(() => {
+      createPeerConnection();
+      
+      // Add local tracks if available
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          if (pc) {
+            pc.addTrack(track, localStream);
+          }
+        });
+      }
+      
+      // If we're admin, create new offer
+      if (role === "admin") {
+        setTimeout(createAndSendOffer, 1000);
+      }
+    }, 500);
+  }
+}
+
+
+function cleanupOnLeave() {
+  console.log("Cleaning up resources...");
+  
+  // Stop all media tracks
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      track.stop();
+      track.enabled = false;
+    });
+    localStream = null;
+  }
+  
+  if (screenStream) {
+    screenStream.getTracks().forEach(track => track.stop());
+    screenStream = null;
+  }
+  
+  // Clear video elements
+  localVideo.srcObject = null;
+  remoteVideo.srcObject = null;
+  
+  // Close peer connection
+  if (pc) {
+    pc.close();
+    pc = null;
+  }
+  
+  // Clear session storage
+  if (roomId) {
+    sessionStorage.removeItem(`reconnecting-${roomId}`);
+    sessionStorage.removeItem(`reconnect-time-${roomId}`);
+  }
+  
+  peerConnectionConfigured = false;
+  mediaStreamReady = false;
+  iceCandidates = [];
+  connectionAttempts = 0;
 }

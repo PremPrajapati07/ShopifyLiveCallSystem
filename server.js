@@ -294,7 +294,7 @@ io.to("admin-room").emit("room-created", {
 
   // User or admin successfully joined room
   socket.on("room-joined", ({ room, role, mediaReady = false }) => {
-    console.log(`${socket.id} joined room ${room} as ${role}, mediaReady: ${mediaReady}`);
+    console.log(`${socket.id} confirmed joined room ${room} as ${role}, mediaReady: ${mediaReady}`);
     
     // Clear connection timeout if both users have joined
     if (activeRooms[room] && connectionTimeouts[room]) {
@@ -304,20 +304,31 @@ io.to("admin-room").emit("room-created", {
       activeRooms[room].status = 'active';
     }
     
-    // Notify other user in room
-    socket.to(room).emit("peer-joined", { 
+    // Update room status
+    if (activeRooms[room]) {
+      activeRooms[room].status = 'active';
+    }
+    
+    // Notify other user in room about reconnection
+    socket.to(room).emit("peer-reconnected", { 
       socketId: socket.id,
       role: role,
       mediaReady: mediaReady,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      isReconnection: true
     });
     
-    // Send room info
-    socket.emit("room-info", {
-      roomId: room,
-      users: Array.from(activeRooms[room]?.users || []),
-      status: activeRooms[room]?.status || 'unknown'
-    });
+    // Send safe room info
+    if (activeRooms[room]) {
+      const safeRoomData = {
+        roomId: room,
+        users: Array.from(activeRooms[room].users || []),
+        status: activeRooms[room].status,
+        userCount: activeRooms[room].users.size
+      };
+      
+      socket.emit("room-info", safeRoomData);
+    }
   });
 
   // Media ready notification
@@ -383,24 +394,49 @@ io.to("admin-room").emit("room-created", {
   });
 
   // WebRTC signaling messages scoped to room
-  socket.on("join-room", (room) => {
-    socket.join(room);
-    console.log(`${socket.id} joined room ${room}`);
-    
-    // Notify others in room
-    socket.to(room).emit("user-joined", { 
-      id: socket.id,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Send any pending offers/answers
-    if (pendingOffers[room] && pendingOffers[room][socket.id]) {
-      socket.emit("offer", pendingOffers[room][socket.id]);
-    }
-    if (pendingAnswers[room] && pendingAnswers[room][socket.id]) {
-      socket.emit("answer", pendingAnswers[room][socket.id]);
-    }
+  // In the "join-room" handler in server.js, add:
+socket.on("join-room", (room) => {
+  console.log(`${socket.id} joining room ${room}`);
+  
+  // Check if already in room
+  const currentRooms = Array.from(socket.rooms);
+  if (currentRooms.includes(room)) {
+    console.log(`${socket.id} already in room ${room}, skipping`);
+    return;
+  }
+  
+  socket.join(room);
+  console.log(`${socket.id} successfully joined room ${room}`);
+  
+  // Update room tracking
+  if (activeRooms[room]) {
+    // Remove old socket ID if it exists
+    activeRooms[room].users.delete(socket.id);
+    // Add new socket ID
+    activeRooms[room].users.add(socket.id);
+    userRooms[socket.id] = room;
+  }
+  
+  // Notify others in room (but not ourselves)
+  socket.to(room).emit("user-joined", { 
+    id: socket.id,
+    timestamp: new Date().toISOString(),
+    isReconnection: true
   });
+  
+  // Send any pending offers/answers
+  if (pendingOffers[room] && pendingOffers[room][socket.id]) {
+    console.log(`Sending pending offer to ${socket.id}`);
+    socket.emit("offer", pendingOffers[room][socket.id]);
+  }
+  if (pendingAnswers[room] && pendingAnswers[room][socket.id]) {
+    console.log(`Sending pending answer to ${socket.id}`);
+    socket.emit("answer", pendingAnswers[room][socket.id]);
+  }
+  
+  // Send buffered messages
+  sendBufferedMessages(socket.id, room);
+});
 
   socket.on("offer", ({ room, offer, targetId }) => {
     console.log(`Offer from ${socket.id} in room ${room}, target: ${targetId || 'broadcast'}`);
@@ -526,39 +562,35 @@ io.to("admin-room").emit("room-created", {
     if (room && activeRooms[room]) {
       activeRooms[room].users.delete(socket.id);
       
-      // Notify other user in room about disconnection
-      socket.to(room).emit("peer-disconnected", {
-        socketId: socket.id,
-        reason: reason,
-        timestamp: new Date().toISOString(),
-        reconnectPossible: reason === "transport close" || reason === "ping timeout"
-      });
+      // Only notify if room still has other users
+      if (activeRooms[room].users.size > 0) {
+        // Notify other user in room about disconnection
+        socket.to(room).emit("peer-disconnected", {
+          socketId: socket.id,
+          reason: reason,
+          timestamp: new Date().toISOString(),
+          reconnectPossible: reason === "transport close" || reason === "ping timeout"
+        });
+      }
       
       // Clean up empty rooms after delay (allow reconnection)
       setTimeout(() => {
         if (activeRooms[room] && activeRooms[room].users.size === 0) {
+          console.log(`Room ${room} is empty, cleaning up`);
           cleanupRoom(room);
         }
-      }, 10000); // 10 second grace period for reconnection
+      }, 30000); // 30 second grace period for reconnection
     }
     
-    delete userRooms[socket.id];
-    
-    // Remove from waiting queue if present
-    if (waitingQueue[socket.id]) {
-      delete waitingQueue[socket.id];
-      // Inform admins to remove if it was in queue
-      io.to("admin-room").emit("remove-call", { userId: socket.id });
-    }
-    
-    // Clean up user data after delay
+    // Don't immediately delete from userRooms - allow reconnection
     setTimeout(() => {
       if (!io.sockets.sockets.get(socket.id)) {
+        delete userRooms[socket.id];
         delete userDataMap[socket.id];
       }
-    }, 30000); // 30 seconds
+    }, 60000); // 60 seconds
   });
-// Chat messages
+  // Chat messages
 socket.on("chat-message", ({ room, message, senderName, senderRole }) => {
   console.log(`Chat message in room ${room} from ${senderName} (${senderRole}): ${message.substring(0, 50)}...`);
   
@@ -702,6 +734,39 @@ function cleanupRoom(roomId) {
   for (const [socketId, room] of Object.entries(userRooms)) {
     if (room === roomId) {
       delete userRooms[socketId];
+    }
+  }
+}
+
+function sendBufferedMessages(socketId, roomId) {
+  // Just log that user rejoined - don't send circular data
+  console.log(`${socketId} rejoined room ${roomId}`);
+  
+  // Send safe room info without circular references
+  if (activeRooms[roomId]) {
+    const socket = io.sockets.sockets.get(socketId);
+    if (socket) {
+      // Create a safe copy of room data without circular references
+      const safeRoomData = {
+        roomId: roomId,
+        users: Array.from(activeRooms[roomId].users || []),
+        createdAt: activeRooms[roomId].createdAt,
+        status: activeRooms[roomId].status,
+        userData: activeRooms[roomId].userData ? {
+          name: activeRooms[roomId].userData.name,
+          phone: activeRooms[roomId].userData.phone,
+          returnUrl: activeRooms[roomId].userData.returnUrl,
+          source: activeRooms[roomId].userData.source
+          // Don't include socket or other circular references
+        } : null
+      };
+      
+      socket.emit("room-info-response", {
+        roomId: roomId,
+        exists: true,
+        data: safeRoomData,
+        userCount: activeRooms[roomId].users.size
+      });
     }
   }
 }
