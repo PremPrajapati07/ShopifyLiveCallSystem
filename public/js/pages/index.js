@@ -177,34 +177,23 @@ async function _showConfirmation(data, scheduledAt, name) {
   });
   confirmBadge.textContent = fmt;
 
-  // If scheduled within 15 min → check if admin online
-  const minsFromNow = (scheduledAt - Date.now()) / 60000;
-  if (minsFromNow <= 16) {
-    const adminOnline = await getAdminStatus();
-
-    if (adminOnline) {
-      joinNowConfirm.style.display = 'flex';
-      joinNowConfirm.onclick = () => { window.location.href = link; };
-      confirmSub.textContent = `${name}, your call is ready! Click below to join, or use your email link.`;
-    } else {
-      joinNowConfirm.style.display = 'none';
-      confirmSub.textContent = `${name}, your call is scheduled. An expert will be available shortly to start the call.`;
-    }
-  } else {
-    joinNowConfirm.style.display = 'none';
-    confirmSub.textContent = `We've sent a confirmation to your email with joining instructions.`;
-  }
+  // Always hide Join Now on confirmation card as requested
+  joinNowConfirm.style.display = 'none';
+  confirmSub.textContent = `We've sent a confirmation to ${data.email || 'your email'} with joining instructions.`;
 
   // Set Back to Vaama link
   const backBtn = document.getElementById('backToVaamaBtn');
-  if (backBtn) backBtn.href = returnUrl || 'https://vaama.co';
+  if (backBtn) {
+    const returnUrl = params.get('return_url') || 'https://vaama.co';
+    backBtn.href = returnUrl;
+  }
 
-  copyBtn.addEventListener('click', () => {
+  copyBtn.onclick = () => {
     navigator.clipboard.writeText(link).then(() => {
       copyBtn.textContent = 'Copied!';
       setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
     });
-  });
+  };
 }
 
 
