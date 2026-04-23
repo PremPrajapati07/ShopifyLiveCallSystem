@@ -22,7 +22,7 @@ const customTime    = document.getElementById('customTime');
 const mainCard      = document.getElementById('mainCard');
 const confirmCard   = document.getElementById('confirmCard');
 const confirmSub    = document.getElementById('confirmSubtitle');
-const confirmBadge  = document.getElementById('confirmTimeBadge');
+const confirmBadge  = document.getElementById('confirmTimeBadgeText');
 const joinLinkUrl   = document.getElementById('joinLinkUrl');
 const copyBtn       = document.getElementById('copyLinkBtn');
 const joinNowConfirm= document.getElementById('joinNowConfirmBtn');
@@ -166,7 +166,7 @@ function _showConfirmation(data, scheduledAt, name) {
     weekday: 'long', day: 'numeric', month: 'long',
     hour: '2-digit', minute: '2-digit', hour12: true,
   });
-  confirmBadge.textContent = `📅 ${fmt}`;
+  confirmBadge.textContent = fmt;
 
   // If scheduled within 15 min → show "Join Now" immediately
   const minsFromNow = (scheduledAt - Date.now()) / 60000;
@@ -177,6 +177,10 @@ function _showConfirmation(data, scheduledAt, name) {
   } else {
     confirmSub.textContent = `We've sent a confirmation to your email with joining instructions.`;
   }
+
+  // Set Back to Vaama link
+  const backBtn = document.getElementById('backToVaamaBtn');
+  if (backBtn) backBtn.href = returnUrl || 'https://vaama.co';
 
   copyBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(link).then(() => {
